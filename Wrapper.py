@@ -1,9 +1,10 @@
+from pickletools import optimize
 import numpy as np
 import cv2
 import matplotlib
 import os
 import glob
-import scipy
+import scipy.optimize
 
 
 def get_corners(images):
@@ -27,16 +28,18 @@ def get_corners(images):
 def get_homography(images, corners_all, world_points):
 
     H = []
+    img_corner_all = []
     for i, (img, corners) in enumerate(zip(images, corners_all)):
         # print("i = ", i)
-        img_corners= np.array([[corners[0][0]],
-                           [corners[8][0]],
-                           [corners[53][0]],
-                           [corners[45][0]]])
-        H_img,_ = cv2.findHomography(world_points, img_corners)
+        # img_corners= np.array([[corners[0][0]],
+        #                    [corners[8][0]],
+        #                    [corners[53][0]],
+        #                    [corners[45][0]]])
+        H_img,_ = cv2.findHomography(world_points, corners)
         H.append(H_img)
+        # img_corner_all.append(img_corners)
 
-    return H
+    return H, img_corner_all
 
 def make_V(H,i,j):
     v = np.array([[H[0][i]*H[0][j]],
@@ -89,7 +92,7 @@ def get_intrinsic_matrix(images, H):
 
     A = np.array([[alpha, gamma, u_0],
                   [0,   beta,  v_0],
-                  [0,   0,      1]])
+                  [0,   0,      1]], dtype=np.float32)
 
     # print("B: = ",B)
     return A, lambda_
@@ -118,7 +121,7 @@ def get_extrinsics(A, H):
         # print("t: = ", t)
 
         R = np.transpose(np.vstack([r1,r2,r3]))
-        Rt = np.transpose(np.vstack([r1,r2,r3,t]))
+        Rt = np.transpose(np.vstack([r1,r2,t]))  # Ignoring r3 as it will be multiplied by 0 anyways
         R_final.append(R)
         Rt_final.append(Rt)
         t_final.append(t)
@@ -127,25 +130,88 @@ def get_extrinsics(A, H):
     # print(t_final)
     return R_final, t_final, Rt_final
 
-def loss_fn(A, Rt, world_points):
-    
+def loss_fn(x0, A, Rt, corners_all, img_corner_all, world_points):
+
+    alpha, gamma, beta, u0, v0, k1, k2 = x0
+    error_total = []
+
+    for i, corners in enumerate(corners_all):
+        rt = Rt[i]
+        # print("A: = ", A)
+        # print("rt: = ", rt)
+        Art = np.matmul(A, rt)
+        # print("Art: = ", Art)
+        error_img = 0
+
+        for j, world_pts in enumerate(world_points):
+
+            wrld_pt_3 = np.array([world_pts[0], world_pts[1], 0, 1])
+            wrld_pt_2 = np.array([world_pts[0], world_pts[1], 1])
+            M = np.matmul(rt, wrld_pt_2)
+            x = M[0]/M[2]
+            y = M[1]/M[2]
+
+            # print("x: = ", x)
+            # print("y: = ", y)
+            mij = corners[j].reshape(2,1)
+            # print("mij: = ", mij)
+            mij = np.array([mij[0], mij[1], 1], dtype = np.float32)      
+
+            N = np.matmul(Art, wrld_pt_2)
+            u = N[0]/N[2]
+            v = N[1]/N[2]    
+            # print("u: = ", u)
+            # print("v: = ", v)
+            # print("u0: = ", u0)
+            # print("v0: = ", v0)
+            u_hat = u + (u - u0) * (k1 * (x**2 + y**2) + k2 * (x**2 + y**2)**2)
+            v_hat = v + (v - v0) * (k1 * (x**2 + y**2) + k2 * (x**2 + y**2)**2)
+
+            m_hat = np.array([u_hat, v_hat, 1], dtype=np.float32)
+            # print("m_ij: = ", mij)
+            # print("m_hat: = ", m_hat)
+
+            error = np.linalg.norm(mij - m_hat)
+            error_img = error_img + error
+            # print("j: = ", j)
+
+        error_total.append(error_img/54)
+    print(error_total[1])
+    return error_total
+
 
 def main():
 
     print('Camera Calibration Begin ----------')
     images = [cv2.imread(file) for file in glob.glob("./Calibration_Imgs/*.jpg")]
 
-    world_points = np.array([[21.5, 21.5], [21.5*9, 21.5], [21.5*9, 21.5*6], [21.5, 21.5*6]], dtype='float32')
+    Yi, Xi = np.indices((9, 6)) 
+    world_points = np.stack(((Xi.ravel()) * 21.5, (Yi.ravel()) * 21.5)).T
+    # world_points = np.array([[21.5, 21.5], [21.5*9, 21.5], [21.5*9, 21.5*6], [21.5, 21.5*6]], dtype='float32')
 
     corners_all = get_corners(images)
-    H = get_homography(images, corners_all, world_points)
+    H, img_corner_all = get_homography(images, corners_all, world_points)
     # print("H: = ", H)
     A, lambda_ = get_intrinsic_matrix(images, H)
-    # print("A: = ", A)
+    print("A: = ", A)
     # print("lambda: = ", lambda_)
     R, t, Rt = get_extrinsics(A, H)
     # print("Rt: = ", Rt)
-    # print(len(corners_all[0]))
+    kc_init = np.array([0,0]).reshape(2,1)
+    alpha = A[0,0]
+    gamma = A[0,1]
+    beta = A[1,1]
+    u0 = A[0,2]
+    v0 = A[1,2]
+    x0 = np.array([alpha, gamma, beta, u0, v0, kc_init[0], kc_init[1]], dtype='float32')
+    res = scipy.optimize.least_squares(fun=loss_fn, x0 = x0, method="lm", args=[A, Rt, corners_all, img_corner_all, world_points])
+    x1 = res.x
+    alpha, gamma, beta, u0, v0, k1, k2 = x1
+    A = np.array([[alpha, gamma, u0], [0, beta, v0], [0, 0, 1]]).reshape(3,3)
+    kc = np.array([k1, k2]).reshape(2,1)
+    print("A: = ", A)
+    print("K: = ", kc)
+
     
     
 
