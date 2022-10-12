@@ -1,10 +1,11 @@
-from pickletools import optimize
+
 import numpy as np
 import cv2
 import matplotlib
 import os
 import glob
 import scipy.optimize
+
 
 
 def get_corners(images):
@@ -23,7 +24,7 @@ def get_corners(images):
         else:
             print("No Checkerboard Found")
 
-    return corners_all
+    return np.array(corners_all)
 
 def get_homography(images, corners_all, world_points):
 
@@ -92,7 +93,7 @@ def get_intrinsic_matrix(images, H):
 
     A = np.array([[alpha, gamma, u_0],
                   [0,   beta,  v_0],
-                  [0,   0,      1]], dtype=np.float32)
+                  [0,   0,      1]], dtype=np.float64)
 
     # print("B: = ",B)
     return A, lambda_
@@ -107,10 +108,9 @@ def get_extrinsics(A, H):
         h1 = np.array([h[0][0], h[1][0], h[2][0]])
         h2 = np.array([h[0][1], h[1][1], h[2][1]])
         h3 = np.array([h[0][2], h[1][2], h[2][2]])
-        # print("h: = ", h2)
 
         # c = np.linalg.norm(np.linalg.inv(A)*h2)
-        l = 1/np.linalg.norm(np.matmul(np.linalg.inv(A),h2))
+        l = 1/np.linalg.norm(np.matmul(np.linalg.inv(A),h1))
         r1 = l*np.matmul(np.linalg.inv(A),h1)
         r2 = l*np.matmul(np.linalg.inv(A),h2)
         r3 = np.cross(r1, r2)
@@ -155,7 +155,7 @@ def loss_fn(x0, A, Rt, corners_all, img_corner_all, world_points):
             # print("y: = ", y)
             mij = corners[j].reshape(2,1)
             # print("mij: = ", mij)
-            mij = np.array([mij[0], mij[1], 1], dtype = np.float32)      
+            mij = np.array([mij[0], mij[1], 1], dtype = np.float64)      
 
             N = np.matmul(Art, wrld_pt_2)
             u = N[0]/N[2]
@@ -167,18 +167,91 @@ def loss_fn(x0, A, Rt, corners_all, img_corner_all, world_points):
             u_hat = u + (u - u0) * (k1 * (x**2 + y**2) + k2 * (x**2 + y**2)**2)
             v_hat = v + (v - v0) * (k1 * (x**2 + y**2) + k2 * (x**2 + y**2)**2)
 
-            m_hat = np.array([u_hat, v_hat, 1], dtype=np.float32)
+            m_hat = np.array([u_hat, v_hat, 1], dtype=np.float64)
             # print("m_ij: = ", mij)
             # print("m_hat: = ", m_hat)
 
-            error = np.linalg.norm(mij - m_hat)
+            error = np.linalg.norm(mij - m_hat)**2
             error_img = error_img + error
             # print("j: = ", j)
 
         error_total.append(error_img/54)
-    print(error_total[1])
+    # print(error_total[1])
     return error_total
 
+
+def reprojection_error(x1, A, Rt, corners_all, img_corner_all, world_points):
+
+    alpha, gamma, beta, u0, v0, k1, k2 = x1
+    print("k1: = ", k1)
+    print("k2: = ", k2)
+    error_total = []
+    reproj_all = []
+    print("A: = ", A)
+
+    for i, corners in enumerate(corners_all):
+        rt = Rt[i]
+        # print("i: = ", i)
+        # print("A: = ", A)
+        # print("rt: = ", rt)
+        Art = np.matmul(A, rt)
+        # print("Art: = ", Art)
+        error_img = 0
+        reproj_ponits = []
+
+        for j, world_pts in enumerate(world_points):
+            
+            # print("j: = ", j)
+            wrld_pt_3 = np.array([world_pts[0], world_pts[1], 0, 1])
+            wrld_pt_2 = np.array([world_pts[0], world_pts[1], 1])
+            M = np.matmul(rt, wrld_pt_2)
+            x = M[0]/M[2]
+            y = M[1]/M[2]
+
+            # print("x: = ", x)
+            # print("y: = ", y)
+            mij = corners[j].reshape(2,1)
+            # print("mij: = ", mij)
+            mij = np.array([mij[0], mij[1], 1], dtype = np.float64)      
+
+            N = np.matmul(Art, wrld_pt_2)
+            u = N[0]/N[2]
+            v = N[1]/N[2]    
+            # print("u: = ", u)
+            # print("v: = ", v)
+            # print("u0: = ", u0)
+            # print("v0: = ", v0)
+            u_hat = u + (u - u0) * (k1 * (x**2 + y**2) + k2 * (x**2 + y**2)**2)
+            v_hat = v + (v - v0) * (k1 * (x**2 + y**2) + k2 * (x**2 + y**2)**2)
+            reproj_ponits.append([u_hat, v_hat])
+
+            m_hat = np.array([u_hat, v_hat, 1], dtype=np.float64)
+            # print("m_ij: = ", mij)
+            # print("m_hat: = ", m_hat)
+
+            error = np.linalg.norm(mij - m_hat)
+            # print("Error: = ", error)
+            error_img = error_img + error
+            # print("j: = ", j)
+
+        reproj_all.append(reproj_ponits)
+        error_total.append(error_img/54)
+
+    # print("Error total: = ",error_total[1])
+    error_total = np.array(error_total)
+    error_avg = np.sum(error_total) / (13*54)
+    return error_avg, reproj_all
+
+def optimize(x0, A, Rt, corners_all, img_corner_all, world_points):
+    x = x0
+    for i in range(1):
+        # print(i)
+        res = scipy.optimize.least_squares(fun=loss_fn, x0 = x, method="lm", args=[ A, Rt, corners_all, img_corner_all, world_points])
+        x = res.x
+        alpha, gamma, beta, u0, v0, k1, k2 = x
+        A = np.array([[alpha, gamma, u0], [0, beta, v0], [0, 0, 1]]).reshape(3,3)
+        # print("x: = ", x)
+    return x
 
 def main():
 
@@ -188,31 +261,54 @@ def main():
     Yi, Xi = np.indices((9, 6)) 
     world_points = np.stack(((Xi.ravel()) * 21.5, (Yi.ravel()) * 21.5)).T
     # world_points = np.array([[21.5, 21.5], [21.5*9, 21.5], [21.5*9, 21.5*6], [21.5, 21.5*6]], dtype='float32')
+    # print("World Points: = ", world_points)
 
     corners_all = get_corners(images)
+    # print("COrnerrs all: = ", corners_all[0])
     H, img_corner_all = get_homography(images, corners_all, world_points)
     # print("H: = ", H)
+
+
     A, lambda_ = get_intrinsic_matrix(images, H)
-    print("A: = ", A)
+    # print("A: = ", A)
     # print("lambda: = ", lambda_)
     R, t, Rt = get_extrinsics(A, H)
     # print("Rt: = ", Rt)
-    kc_init = np.array([0,0]).reshape(2,1)
+    # kc_init = np.array([0,0]).reshape(2,1)
+    k1 = 0
+    k2 = 0
     alpha = A[0,0]
     gamma = A[0,1]
     beta = A[1,1]
     u0 = A[0,2]
     v0 = A[1,2]
-    x0 = np.array([alpha, gamma, beta, u0, v0, kc_init[0], kc_init[1]], dtype='float32')
-    res = scipy.optimize.least_squares(fun=loss_fn, x0 = x0, method="lm", args=[A, Rt, corners_all, img_corner_all, world_points])
-    x1 = res.x
-    alpha, gamma, beta, u0, v0, k1, k2 = x1
+    x0 = np.array([alpha, gamma, beta, u0, v0, k1, k2])
+    # res = scipy.optimize.least_squares(fun=loss_fn, x0 = x0, method="lm", args=[A, Rt, corners_all, img_corner_all, world_points])
+    # x1 = res.x
+    # alpha, gamma, beta, u0, v0, k1, k2 = x1
+    x = optimize(x0, A, Rt, corners_all, img_corner_all, world_points)
+    alpha, gamma, beta, u0, v0, k1, k2 = x
     A = np.array([[alpha, gamma, u0], [0, beta, v0], [0, 0, 1]]).reshape(3,3)
     kc = np.array([k1, k2]).reshape(2,1)
-    print("A: = ", A)
-    print("K: = ", kc)
+    # print("A: = ", A)
+    # print("K: = ", kc)
+    err,points = reprojection_error(x, A, Rt, corners_all, img_corner_all, world_points)
+    print("New error: = ", err)
 
-    
+    K = np.array(A, np.float32).reshape(3,3)
+    D = np.array([k1,k2, 0, 0] , np.float32)
+    for i,image_points in enumerate(points):
+        image = cv2.undistort(images[i], K, D)
+        for point in image_points:
+            x = int(point[0])
+            y = int(point[1])
+            fnl = cv2.drawChessboardCorners(image, (9, 6), corners_all[i], 1)
+            image = cv2.circle(image, (x, y), 5, (0, 0, 255), 3)
+
+        # cv2.imshow("Undistorted img", image)
+        # cv2.waitKey(0)
+
+    cv2.destroyAllWindows()
     
 
 
